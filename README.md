@@ -11,7 +11,7 @@ Orb is my desktop companion project: a small, always-on-top assistant that bring
 - Keep a temporary file stash and access clipboard tools.
 - Show desktop telemetry when running as a native application.
 
-In the Windows desktop build, Orb adjusts system volume and supported display brightness directly. Wi-Fi, Bluetooth, power, notifications, and Night Light shortcuts open the matching Windows Settings pages. Display brightness depends on monitor support; unsupported controls report an error instead of changing only Orb's appearance. Browser preview mode does not change Windows settings.
+In the Windows desktop build, Orb adjusts system volume and supported display brightness directly. Wi-Fi, Bluetooth, power, notifications, and Night Light shortcuts open the matching Windows Settings pages. Display brightness depends on monitor support; unsupported controls report an error instead of changing only Orb's appearance. Browser preview mode does not change Windows settings. Some other features use sample data or are still demonstrations, and may behave differently in the browser preview.
 
 ## Run locally
 
