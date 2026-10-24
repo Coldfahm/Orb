@@ -1,0 +1,6 @@
+{
+  "name": "Orb - Shape-Shifting Desktop Assistant",
+  "description": "A lightweight, always-on-top, shape-shifting desktop companion and productivity hub built with Tauri (Rust), React, Framer Motion, and Tailwind CSS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
