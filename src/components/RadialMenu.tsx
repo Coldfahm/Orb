@@ -43,6 +43,7 @@ import {
   SunMedium,
   SunDim,
   ArrowBigUpDash,
+  X,
 } from 'lucide-react';
 
 interface RadialMenuProps {
@@ -89,6 +90,7 @@ const iconMap: Record<string, React.FC<{ className?: string }>> = {
   wind: Wind,
   sun: Sun,
   capsLock: ArrowBigUpDash,
+  close: X,
 };
 
 export const RadialMenu: React.FC<RadialMenuProps> = ({

@@ -4,7 +4,6 @@ import { CloudRain, Waves, Flame, Wind, Sparkles } from 'lucide-react';
 
 interface ZenFaceProps {
   activeSound: 'rain' | 'waves' | 'campfire' | null;
-  isNightDim: boolean;
 }
 
 export const ZenFace: React.FC<ZenFaceProps> = ({ activeSound }) => {

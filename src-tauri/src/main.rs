@@ -9,6 +9,24 @@ use std::time::Duration;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, Networks, RefreshKind, System};
 use tauri::{AppHandle, Manager};
 
+#[cfg(target_os = "windows")]
+use windows::{
+    core::{BOOL, IUnknown},
+    Win32::{
+        Devices::Display::{
+            DestroyPhysicalMonitors, GetMonitorBrightness, GetNumberOfPhysicalMonitorsFromHMONITOR,
+            GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR, SetMonitorBrightness,
+        },
+        Foundation::{LPARAM, RECT},
+        Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR},
+        Media::Audio::{
+            Endpoints::IAudioEndpointVolume, eMultimedia, eRender, IMMDeviceEnumerator,
+            MMDeviceEnumerator,
+        },
+        System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED},
+    },
+};
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct MouseCoords {
     pub x: f64,
@@ -144,21 +162,266 @@ fn process_dropped_file(path: String, state: tauri::State<AppState>) -> Result<S
 }
 
 #[tauri::command]
-fn set_system_volume(volume: u32) -> Result<String, String> {
-    println!("[Orb OS Control] System volume set to {}%", volume);
-    Ok(format!("Volume {}%", volume))
+fn get_system_volume() -> Result<u32, String> {
+    #[cfg(target_os = "windows")]
+    {
+        return with_default_audio_endpoint(|endpoint| unsafe {
+            endpoint
+                .GetMasterVolumeLevelScalar()
+                .map(|volume| (volume * 100.0).round() as u32)
+                .map_err(|error| format!("Unable to read system volume: {error}"))
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    Err("System volume controls are currently supported on Windows only.".into())
 }
 
 #[tauri::command]
-fn toggle_wifi() -> Result<bool, String> {
-    println!("[Orb OS Control] Toggling Wi-Fi radio adapter");
-    Ok(true)
+fn set_system_volume(volume: u32) -> Result<(), String> {
+    if volume > 100 {
+        return Err("Volume must be between 0 and 100.".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return with_default_audio_endpoint(|endpoint| unsafe {
+            endpoint
+                .SetMasterVolumeLevelScalar(volume as f32 / 100.0, std::ptr::null())
+                .map_err(|error| format!("Unable to set system volume: {error}"))
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    Err("System volume controls are currently supported on Windows only.".into())
 }
 
 #[tauri::command]
-fn toggle_bluetooth() -> Result<bool, String> {
-    println!("[Orb OS Control] Toggling Bluetooth radio adapter");
-    Ok(true)
+fn get_system_brightness() -> Result<u32, String> {
+    #[cfg(target_os = "windows")]
+    if let Some(brightness) = get_physical_display_brightness()? {
+        return Ok(brightness);
+    }
+
+    run_powershell(
+        "$ErrorActionPreference = 'Stop'; try { $monitor = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightness | Select-Object -First 1; if (-not $monitor) { throw 'No brightness-controllable display was found.' }; [Console]::Out.Write([int]$monitor.CurrentBrightness) } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
+    )?
+    .parse()
+    .map_err(|error| format!("Unable to read display brightness: {error}"))
+}
+
+#[tauri::command]
+fn set_system_brightness(brightness: u32) -> Result<(), String> {
+    if brightness > 100 {
+        return Err("Brightness must be between 0 and 100.".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    if set_physical_display_brightness(brightness)? {
+        return Ok(());
+    }
+
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; try {{ $monitors = @(Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods); if ($monitors.Count -eq 0) {{ throw 'No brightness-controllable display was found.' }}; foreach ($monitor in $monitors) {{ $result = Invoke-CimMethod -InputObject $monitor -MethodName WmiSetBrightness -Arguments @{{ Timeout = 1; Brightness = [byte]{brightness} }}; if ($result.ReturnValue -ne 0) {{ throw \"Display rejected brightness change (code $($result.ReturnValue)).\" }} }} }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"
+    );
+    run_powershell(&script).map(|_| ())
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn collect_display_monitors(
+    monitor: HMONITOR,
+    _device_context: HDC,
+    _monitor_rect: *mut RECT,
+    data: LPARAM,
+) -> BOOL {
+    let monitors = &mut *(data.0 as *mut Vec<HMONITOR>);
+    monitors.push(monitor);
+    BOOL(1)
+}
+
+#[cfg(target_os = "windows")]
+fn enumerate_physical_monitors() -> Result<Vec<PHYSICAL_MONITOR>, String> {
+    let mut display_monitors = Vec::new();
+    let enumerated = unsafe {
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(collect_display_monitors),
+            LPARAM(&mut display_monitors as *mut Vec<HMONITOR> as isize),
+        )
+    };
+    if !enumerated.as_bool() {
+        return Err("Windows could not enumerate connected displays.".into());
+    }
+
+    let mut physical_monitors = Vec::new();
+    for display in display_monitors {
+        let mut count = 0;
+        if unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(display, &mut count) }.is_err()
+            || count == 0
+        {
+            continue;
+        }
+
+        let mut monitors = vec![PHYSICAL_MONITOR::default(); count as usize];
+        if unsafe { GetPhysicalMonitorsFromHMONITOR(display, &mut monitors) }.is_ok() {
+            physical_monitors.extend(monitors);
+        }
+    }
+
+    Ok(physical_monitors)
+}
+
+#[cfg(target_os = "windows")]
+struct PhysicalMonitorHandles(Vec<PHYSICAL_MONITOR>);
+
+#[cfg(target_os = "windows")]
+impl Drop for PhysicalMonitorHandles {
+    fn drop(&mut self) {
+        if !self.0.is_empty() {
+            unsafe {
+                let _ = DestroyPhysicalMonitors(&self.0);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_physical_display_brightness() -> Result<Option<u32>, String> {
+    let monitors = PhysicalMonitorHandles(enumerate_physical_monitors()?);
+    let mut readings = Vec::new();
+    for monitor in &monitors.0 {
+        let (mut minimum, mut current, mut maximum) = (0, 0, 0);
+        let supported = unsafe {
+            GetMonitorBrightness(
+                monitor.hPhysicalMonitor,
+                &mut minimum,
+                &mut current,
+                &mut maximum,
+            )
+        };
+        if supported != 0 && maximum > minimum {
+            readings.push(
+                current.saturating_sub(minimum) as f64 * 100.0 / (maximum - minimum) as f64,
+            );
+        }
+    }
+
+    if readings.is_empty() {
+        return Ok(None);
+    }
+
+    let average = readings.iter().sum::<f64>() / readings.len() as f64;
+    Ok(Some(average.round() as u32))
+}
+
+#[cfg(target_os = "windows")]
+fn set_physical_display_brightness(brightness: u32) -> Result<bool, String> {
+    let monitors = PhysicalMonitorHandles(enumerate_physical_monitors()?);
+    let mut changed = 0;
+    for monitor in &monitors.0 {
+        let (mut minimum, mut current, mut maximum) = (0, 0, 0);
+        let supported = unsafe {
+            GetMonitorBrightness(
+                monitor.hPhysicalMonitor,
+                &mut minimum,
+                &mut current,
+                &mut maximum,
+            )
+        };
+        if supported == 0 || maximum <= minimum {
+            continue;
+        }
+
+        let target = minimum
+            + (((maximum - minimum) as f64 * brightness as f64 / 100.0).round() as u32);
+        if unsafe { SetMonitorBrightness(monitor.hPhysicalMonitor, target) } == 0 {
+            return Err("A connected display rejected the brightness change.".into());
+        }
+        changed += 1;
+    }
+
+    Ok(changed > 0)
+}
+
+#[tauri::command]
+fn open_system_settings(page: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let uri = match page.as_str() {
+            "wifi" => "ms-settings:network-wifi",
+            "bluetooth" => "ms-settings:bluetooth",
+            "power" => "ms-settings:powersleep",
+            "notifications" => "ms-settings:notifications",
+            "night-light" => "ms-settings:nightlight",
+            _ => return Err(format!("Unknown Windows Settings page: {page}")),
+        };
+
+        return open::that(uri).map_err(|error| format!("Unable to open Windows Settings: {error}"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    Err(format!(
+        "Windows Settings shortcuts are unavailable for the {page} page on this platform."
+    ))
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+#[cfg(target_os = "windows")]
+fn with_default_audio_endpoint<T>(
+    action: impl FnOnce(&IAudioEndpointVolume) -> Result<T, String>,
+) -> Result<T, String> {
+    unsafe {
+        CoInitializeEx(None, COINIT_MULTITHREADED)
+            .ok()
+            .map_err(|error| format!("Unable to initialize Windows audio controls: {error}"))?;
+
+        let result = (|| {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None::<&IUnknown>, CLSCTX_ALL)
+                    .map_err(|error| format!("Unable to access Windows audio: {error}"))?;
+            let device = enumerator
+                .GetDefaultAudioEndpoint(eRender, eMultimedia)
+                .map_err(|error| format!("Unable to find the default audio device: {error}"))?;
+            let endpoint: IAudioEndpointVolume = device
+                .Activate(CLSCTX_ALL, None)
+                .map_err(|error| format!("Unable to access the default audio device: {error}"))?;
+            action(&endpoint)
+        })();
+
+        CoUninitialize();
+        result
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn run_powershell(script: &str) -> Result<String, String> {
+    use std::process::Command;
+
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .map_err(|error| format!("Unable to start Windows display controls: {error}"))?;
+
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "Windows could not change the display brightness.".into()
+        } else {
+            format!("Unable to change display brightness: {detail}")
+        });
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_powershell(_script: &str) -> Result<String, String> {
+    Err("Display brightness controls are currently supported on Windows only.".into())
 }
 
 #[tauri::command]
@@ -235,13 +498,52 @@ fn main() {
         .manage(state)
         .setup(|app| {
             let app_handle = app.handle();
+            if let Some(window) = app.get_window("main") {
+                if let Err(error) = window.set_ignore_cursor_events(true) {
+                    eprintln!("[Orb] Unable to enable desktop click-through: {error}");
+                }
+            }
 
             // 1. Global Mouse Tracking via rdev (under 1MB RAM footprint)
             let mouse_app_handle = app_handle.clone();
             std::thread::spawn(move || {
+                let mut ignore_cursor_events = true;
                 if let Err(error) = listen(move |event: Event| {
                     if let EventType::MouseMove { x, y } = event.event_type {
-                        let _ = mouse_app_handle.emit_all("mouse-moved", MouseCoords { x, y });
+                        if let Some(window) = mouse_app_handle.get_window("main") {
+                            if let (Ok(position), Ok(size), Ok(scale_factor)) = (
+                                window.outer_position(),
+                                window.inner_size(),
+                                window.scale_factor(),
+                            )
+                            {
+                                let center_x = position.x as f64 + size.width as f64 / 2.0;
+                                let center_y = position.y as f64 + size.height as f64 / 2.0;
+                                let relative_x = (x - center_x) / scale_factor;
+                                let relative_y = (y - center_y) / scale_factor;
+                                let should_ignore_cursor =
+                                    relative_x.hypot(relative_y) > 140.0;
+
+                                if should_ignore_cursor != ignore_cursor_events {
+                                    match window.set_ignore_cursor_events(should_ignore_cursor) {
+                                        Ok(()) => {
+                                            ignore_cursor_events = should_ignore_cursor;
+                                        }
+                                        Err(error) => eprintln!(
+                                            "[Orb] Unable to update desktop click-through: {error}"
+                                        ),
+                                    }
+                                }
+
+                                let _ = mouse_app_handle.emit_all(
+                                    "mouse-moved",
+                                    MouseCoords {
+                                        x: relative_x,
+                                        y: relative_y,
+                                    },
+                                );
+                            }
+                        }
                     }
                 }) {
                     eprintln!("[Orb] Error starting global mouse hook: {:?}", error);
@@ -332,9 +634,12 @@ fn main() {
             get_system_stats,
             get_clipboard_history,
             copy_to_clipboard,
+            get_system_volume,
             set_system_volume,
-            toggle_wifi,
-            toggle_bluetooth
+            get_system_brightness,
+            set_system_brightness,
+            open_system_settings,
+            quit_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running Orb Desktop Assistant");

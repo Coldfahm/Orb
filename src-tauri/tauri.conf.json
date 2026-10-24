@@ -4,7 +4,8 @@
     "beforeBuildCommand": "npm run build",
     "beforeDevCommand": "npm run dev",
     "devPath": "http://localhost:3000",
-    "distDir": "../dist"
+    "distDir": "../dist",
+    "withGlobalTauri": true
   },
   "package": {
     "productName": "Orb Desktop Assistant",
@@ -77,17 +78,17 @@
       {
         "label": "main",
         "title": "Orb Assistant",
-        "width": 1920,
-        "height": 1080,
+        "width": 360,
+        "height": 240,
         "minWidth": 120,
         "minHeight": 120,
-        "resizable": true,
+        "resizable": false,
         "fullscreen": false,
         "focus": false,
         "transparent": true,
         "decorations": false,
         "alwaysOnTop": true,
-        "skipTaskbar": false,
+        "skipTaskbar": true,
         "center": true
       }
     ]

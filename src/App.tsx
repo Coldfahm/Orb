@@ -15,9 +15,17 @@ import {
   listenSystemTelemetry,
   launchApp,
   copyTextToClipboard,
+  getSystemBrightness,
+  getSystemVolume,
   initialClipboardHistory,
   initialStashItems,
+  isTauri,
+  openSystemSettings,
+  quitApp,
+  setSystemBrightness,
+  setSystemVolume,
 } from './lib/tauri-bridge';
+import type { SystemSettingsPage } from './lib/tauri-bridge';
 import { PetFace } from './components/PetFace';
 import { RadialMenu } from './components/RadialMenu';
 import { MediaLyricsView } from './components/MediaLyricsView';
@@ -43,6 +51,10 @@ const MODES: ActiveMode[] = [
   'clipboard',
 ];
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export default function App() {
   const [activeModeIndex, setActiveModeIndex] = useState<number>(0);
   const activeMode = MODES[activeModeIndex];
@@ -60,6 +72,9 @@ export default function App() {
   const [isScrollBumping, setIsScrollBumping] = useState(false);
   const [isWidgetHovered, setIsWidgetHovered] = useState(false);
   const [isAiListening, setIsAiListening] = useState(false);
+  const [systemControlError, setSystemControlError] = useState<string | null>(null);
+  const volumeRequestRef = useRef(0);
+  const brightnessRequestRef = useRef(0);
 
   // Return-to-home debounce timer
   const returnHomeTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -70,19 +85,14 @@ export default function App() {
   const isPlayingMusicRef = useRef<boolean>(true);
   const [isPlayingMusic, setIsPlayingMusic] = useState<boolean>(true);
 
-  // Basic Controls State (Bluetooth, Sound, WiFi, Light, Battery, DND)
+  // System audio and display levels
   const [volume, setVolume] = useState<number>(80);
   const prevVolumeRef = useRef<number>(80);
   const [brightness, setBrightness] = useState<number>(90);
-  const [wifiEnabled, setWifiEnabled] = useState<boolean>(true);
-  const [bluetoothEnabled, setBluetoothEnabled] = useState<boolean>(true);
-  const [batterySaver, setBatterySaver] = useState<boolean>(false);
-  const [dndEnabled, setDndEnabled] = useState<boolean>(false);
   const { isCapsLockOn, toggleCapsLock } = useCapsLock();
 
-  // Zen Ambiance & Night Light
+  // Zen ambiance
   const [activeAmbiance, setActiveAmbiance] = useState<'rain' | 'waves' | 'campfire' | null>(null);
-  const [isNightDim, setIsNightDim] = useState(false);
 
   // Quick-Drop & Bite Stash States
   const [isDraggingFileOver, setIsDraggingFileOver] = useState(false);
@@ -109,9 +119,38 @@ export default function App() {
     isPlayingMusicRef.current = isPlayingMusic;
   }, [isPlayingMusic]);
 
-  // Sync initial master volume
+  // Keep generated Orb sounds independent from Windows master volume.
   useEffect(() => {
-    sound.setMasterVolume(volume / 100);
+    if (!isTauri) sound.setMasterVolume(volume / 100);
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri) return;
+
+    let active = true;
+    getSystemVolume()
+      .then((actualVolume) => {
+        if (!active) return;
+        setVolume(actualVolume);
+        if (actualVolume > 0) prevVolumeRef.current = actualVolume;
+      })
+      .catch((error: unknown) => {
+        if (active) setSystemControlError(`Couldn't read system volume: ${errorMessage(error)}`);
+      });
+
+    getSystemBrightness()
+      .then((actualBrightness) => {
+        if (active) setBrightness(actualBrightness);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setSystemControlError(`Couldn't read screen brightness: ${errorMessage(error)}`);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   const isPill =
@@ -123,6 +162,11 @@ export default function App() {
   const currentH = 64;
 
   const updateCenter = useCallback(() => {
+    if (isTauri) {
+      setWidgetCenter({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+      return;
+    }
+
     const curX = posX.get();
     const curY = posY.get();
     setWidgetCenter({
@@ -135,46 +179,95 @@ export default function App() {
     updateCenter();
   }, [updateCenter, isPill]);
 
+  const applySystemVolume = useCallback((nextVolume: number) => {
+    if (!isTauri) {
+      setSystemControlError('System audio controls require the Orb desktop app.');
+      return;
+    }
+
+    const requestId = ++volumeRequestRef.current;
+    setVolume(nextVolume);
+    void setSystemVolume(nextVolume)
+      .then(() => {
+        if (requestId === volumeRequestRef.current) {
+          setSystemControlError(null);
+          if (nextVolume > 0) prevVolumeRef.current = nextVolume;
+        }
+      })
+      .catch(async (error: unknown) => {
+        if (requestId !== volumeRequestRef.current) return;
+        setSystemControlError(`Couldn't change system volume: ${errorMessage(error)}`);
+        try {
+          const actualVolume = await getSystemVolume();
+          if (requestId === volumeRequestRef.current) setVolume(actualVolume);
+        } catch {
+          // Keep the last known system value and show the original control error.
+        }
+      });
+  }, []);
+
+  const applySystemBrightness = useCallback((nextBrightness: number) => {
+    if (!isTauri) {
+      setSystemControlError('Screen brightness controls require the Orb desktop app.');
+      return;
+    }
+
+    const requestId = ++brightnessRequestRef.current;
+    setBrightness(nextBrightness);
+    void setSystemBrightness(nextBrightness)
+      .then(() => {
+        if (requestId === brightnessRequestRef.current) setSystemControlError(null);
+      })
+      .catch(async (error: unknown) => {
+        if (requestId !== brightnessRequestRef.current) return;
+        setSystemControlError(`Couldn't change screen brightness: ${errorMessage(error)}`);
+        try {
+          const actualBrightness = await getSystemBrightness();
+          if (requestId === brightnessRequestRef.current) setBrightness(actualBrightness);
+        } catch {
+          // Keep the last known display value and show the original control error.
+        }
+      });
+  }, []);
+
+  const openSettings = useCallback((page: SystemSettingsPage) => {
+    if (!isTauri) {
+      setSystemControlError('Windows Settings shortcuts require the Orb desktop app.');
+      return;
+    }
+
+    void openSystemSettings(page)
+      .then(() => setSystemControlError(null))
+      .catch((error: unknown) => {
+        setSystemControlError(`Couldn't open Windows Settings: ${errorMessage(error)}`);
+      });
+  }, []);
+
   // Volume Scroll & Mute Handlers
   const handleVolumeScroll = useCallback((delta: number) => {
-    setVolume((prev) => {
-      const next = Math.max(0, Math.min(100, prev + (delta > 0 ? 5 : -5)));
-      sound.setMasterVolume(next / 100);
-      sound.playVolumeTick(next);
-      return next;
-    });
-  }, []);
+    const next = Math.max(0, Math.min(100, volume + (delta > 0 ? 5 : -5)));
+    applySystemVolume(next);
+    sound.playVolumeTick(next);
+  }, [applySystemVolume, volume]);
 
   const toggleMute = useCallback(() => {
-    setVolume((prev) => {
-      if (prev > 0) {
-        prevVolumeRef.current = prev;
-        sound.setMasterVolume(0);
-        sound.playTick();
-        return 0;
-      } else {
-        const restored = prevVolumeRef.current || 80;
-        sound.setMasterVolume(restored / 100);
-        sound.playVolumeTick(restored);
-        return restored;
-      }
-    });
-  }, []);
+    const next = volume > 0 ? 0 : prevVolumeRef.current || 80;
+    if (volume > 0) prevVolumeRef.current = volume;
+    applySystemVolume(next);
+    sound.playTick();
+  }, [applySystemVolume, volume]);
 
-  // Brightness Scroll & Preset Handlers
+  // Screen brightness Scroll & Preset Handlers
   const handleBrightnessScroll = useCallback((delta: number) => {
-    setBrightness((prev) => {
-      sound.playTick();
-      return Math.max(15, Math.min(100, prev + (delta > 0 ? 5 : -5)));
-    });
-  }, []);
+    const next = Math.max(15, Math.min(100, brightness + (delta > 0 ? 5 : -5)));
+    applySystemBrightness(next);
+    sound.playTick();
+  }, [applySystemBrightness, brightness]);
 
   const toggleBrightness = useCallback(() => {
-    setBrightness((prev) => {
-      sound.playTick();
-      return prev > 40 ? 30 : 100;
-    });
-  }, []);
+    applySystemBrightness(brightness > 40 ? 30 : 100);
+    sound.playTick();
+  }, [applySystemBrightness, brightness]);
 
   // Automatic Return to Home when Pointer Leaves the Pet
   const scheduleReturnToHome = useCallback(() => {
@@ -334,7 +427,7 @@ export default function App() {
   // Calibrated boundary radius (R = 58px)
   const definedOrbitRadius = 58;
 
-  // Basic Controls Tools (Bluetooth, Sound, WiFi, Light, Battery, DND)
+  // Direct controls update Windows; the remaining entries open Windows Settings.
   const controlsTools: RadialTool[] = [
     {
       id: 'sound',
@@ -347,7 +440,7 @@ export default function App() {
     },
     {
       id: 'light',
-      label: 'Brightness',
+      label: 'Screen brightness',
       iconName: 'sun',
       isScrollable: true,
       value: brightness,
@@ -356,44 +449,27 @@ export default function App() {
     },
     {
       id: 'wifi',
-      label: 'Wi-Fi',
-      iconName: wifiEnabled ? 'wifi' : 'wifiOff',
-      isActive: wifiEnabled,
-      action: () => {
-        setWifiEnabled((prev) => !prev);
-        sound.playTick();
-      },
+      label: 'Wi-Fi settings',
+      iconName: 'wifi',
+      action: () => openSettings('wifi'),
     },
     {
       id: 'bluetooth',
-      label: 'Bluetooth',
-      iconName: bluetoothEnabled ? 'bluetooth' : 'bluetoothOff',
-      isActive: bluetoothEnabled,
-      action: () => {
-        setBluetoothEnabled((prev) => !prev);
-        sound.playTick();
-      },
+      label: 'Bluetooth settings',
+      iconName: 'bluetooth',
+      action: () => openSettings('bluetooth'),
     },
     {
       id: 'battery',
-      label: 'Battery Saver',
-      iconName: batterySaver ? 'batteryCharging' : 'battery',
-      badge: batterySaver ? 'ECO' : '92%',
-      isActive: batterySaver,
-      action: () => {
-        setBatterySaver((prev) => !prev);
-        sound.playTick();
-      },
+      label: 'Power settings',
+      iconName: 'battery',
+      action: () => openSettings('power'),
     },
     {
       id: 'dnd',
-      label: 'Do Not Disturb',
-      iconName: dndEnabled ? 'bellOff' : 'bell',
-      isActive: !dndEnabled,
-      action: () => {
-        setDndEnabled((prev) => !prev);
-        sound.playTick();
-      },
+      label: 'Notification settings',
+      iconName: 'bell',
+      action: () => openSettings('notifications'),
     },
     {
       id: 'capslock',
@@ -402,6 +478,16 @@ export default function App() {
       badge: isCapsLockOn ? 'ON' : 'OFF',
       isActive: isCapsLockOn,
       action: toggleCapsLock,
+    },
+    {
+      id: 'quit',
+      label: 'Quit Orb',
+      iconName: 'close',
+      action: () => {
+        void quitApp().catch((error: unknown) => {
+          setSystemControlError(`Couldn't quit Orb: ${errorMessage(error)}`);
+        });
+      },
     },
   ];
 
@@ -612,11 +698,9 @@ export default function App() {
     },
     {
       id: 'moon',
-      label: 'Night Light',
+      label: 'Night Light settings',
       iconName: 'moon',
-      action: () => {
-        setIsNightDim((prev) => !prev);
-      },
+      action: () => openSettings('night-light'),
     },
   ];
 
@@ -640,21 +724,18 @@ export default function App() {
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      style={{
-        // Real screen brightness filter controlled by light scroll dial
-        filter: `brightness(${brightness}%)`,
-      }}
-      className="w-screen h-screen relative overflow-hidden select-none bg-transparent outline-none pointer-events-none transition-[filter] duration-200"
+      className="w-screen h-screen relative overflow-hidden select-none bg-transparent outline-none pointer-events-none"
     >
-      {/* Night Dimmer Ambient Scrim */}
       <AnimatePresence>
-        {isNightDim && (
+        {systemControlError && (
           <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 0.35 }}
-            exit={{ opacity: 0 }}
-            className="absolute inset-0 bg-amber-950/70 pointer-events-none z-10"
-          />
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            className="absolute left-1/2 top-2 z-50 w-[220px] -translate-x-1/2 rounded-md border border-rose-300/30 bg-slate-950/95 px-2 py-1 text-center text-[8px] leading-tight text-rose-200 shadow-lg pointer-events-none"
+          >
+            {systemControlError}
+          </motion.div>
         )}
       </AnimatePresence>
 
@@ -663,16 +744,16 @@ export default function App() {
       {/* Zero top bars, zero bottom docks! Floating borderless in space */}
       {/* --------------------------------------------------------- */}
       <motion.div
-        drag
+        drag={!isTauri}
         dragMomentum={false}
         dragElastic={0}
         dragConstraints={false}
-        onDrag={updateCenter}
-        onDragEnd={updateCenter}
+        onDrag={isTauri ? undefined : updateCenter}
+        onDragEnd={isTauri ? undefined : updateCenter}
         variants={widgetVariants}
         animate={isPill ? 'pill' : 'circle'}
         style={{
-          x: posX,
+          x: isTauri ? window.innerWidth / 2 - currentW / 2 : posX,
           y: posY,
           position: 'absolute',
           top: 0,
@@ -694,7 +775,7 @@ export default function App() {
           }
           scheduleReturnToHome();
         }}
-        data-tauri-drag-region
+        data-tauri-drag-region={isTauri}
         className={`pointer-events-auto select-none cursor-grab active:cursor-grabbing flex items-center justify-center relative backdrop-blur-2xl bg-slate-900/85 border shadow-2xl rounded-full outline-none focus:outline-none focus:ring-0 ${
           isCapsLockOn
             ? 'border-amber-400/90 shadow-[0_0_35px_rgba(251,191,36,0.85),0_0_70px_rgba(245,158,11,0.4)] ring-2 ring-amber-400/50'
@@ -752,16 +833,14 @@ export default function App() {
               onCloseLyrics={() => setLyricsActive(false)}
             />
           ) : activeMode === 'controls' ? (
-            // Basic Controls Center (Bluetooth, WiFi, Volume, Brightness, CapsLock)
+            // Basic system controls
             <ControlsFace
               volume={volume}
               brightness={brightness}
-              wifiEnabled={wifiEnabled}
-              bluetoothEnabled={bluetoothEnabled}
               isCapsLockOn={isCapsLockOn}
             />
           ) : activeMode === 'zen' ? (
-            <ZenFace activeSound={activeAmbiance} isNightDim={isNightDim} />
+            <ZenFace activeSound={activeAmbiance} />
           ) : activeMode === 'clipboard' ? (
             <ClipboardView items={clipboardItems} />
           ) : activeMode === 'ai' && isAiListening ? (

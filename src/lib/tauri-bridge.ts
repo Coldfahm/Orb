@@ -4,6 +4,42 @@ import { MouseCoords, SystemStats, ClipboardItem, StashItem } from './types';
 export const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
 type UnlistenFn = () => void;
+export type SystemSettingsPage = 'wifi' | 'bluetooth' | 'power' | 'notifications' | 'night-light';
+
+function invokeDesktop<T>(command: string, args?: unknown): Promise<T> {
+  if (!isTauri) {
+    return Promise.reject(new Error('System controls require the Orb desktop app.'));
+  }
+
+  const tauri = window as unknown as {
+    __TAURI__: { tauri: { invoke: (command: string, args?: unknown) => Promise<T> } };
+  };
+  return tauri.__TAURI__.tauri.invoke(command, args);
+}
+
+export function getSystemVolume(): Promise<number> {
+  return invokeDesktop<number>('get_system_volume');
+}
+
+export function setSystemVolume(volume: number): Promise<void> {
+  return invokeDesktop<void>('set_system_volume', { volume });
+}
+
+export function getSystemBrightness(): Promise<number> {
+  return invokeDesktop<number>('get_system_brightness');
+}
+
+export function setSystemBrightness(brightness: number): Promise<void> {
+  return invokeDesktop<void>('set_system_brightness', { brightness });
+}
+
+export function openSystemSettings(page: SystemSettingsPage): Promise<void> {
+  return invokeDesktop<void>('open_system_settings', { page });
+}
+
+export function quitApp(): Promise<void> {
+  return invokeDesktop<void>('quit_app');
+}
 
 // -------------------------------------------------------------
 // Mouse Tracking Hook / Listener
@@ -82,12 +118,7 @@ export function listenSystemTelemetry(callback: (stats: SystemStats) => void): U
 // -------------------------------------------------------------
 export async function launchApp(appName: string): Promise<string> {
   if (isTauri) {
-    try {
-      const tauriInvoke = (window as unknown as { __TAURI__: { invoke: (cmd: string, args?: unknown) => Promise<string> } }).__TAURI__.invoke;
-      return await tauriInvoke('launch_app', { appName });
-    } catch (err) {
-      console.warn('Tauri invoke error:', err);
-    }
+    return invokeDesktop<string>('launch_app', { appName });
   }
 
   // Simulated launch notification
@@ -99,12 +130,7 @@ export async function launchApp(appName: string): Promise<string> {
 // -------------------------------------------------------------
 export async function runTerminalCommand(command: string): Promise<string> {
   if (isTauri) {
-    try {
-      const tauriInvoke = (window as unknown as { __TAURI__: { invoke: (cmd: string, args?: unknown) => Promise<string> } }).__TAURI__.invoke;
-      return await tauriInvoke('run_terminal_command', { command });
-    } catch (err) {
-      console.warn('Tauri invoke error:', err);
-    }
+    return invokeDesktop<string>('run_terminal_command', { command });
   }
 
   const parts = command.trim().split(' ');
