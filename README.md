@@ -1,33 +1,52 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Orb
 
-# Run and deploy your AI Studio app
+Orb is my desktop companion project: a small, always-on-top assistant that brings quick tools and a playful interface to the desktop.
 
-This contains everything you need to run your app locally.
+## What it can do
 
-View your app in AI Studio: https://ai.studio/apps/87262869-f004-42c7-8c2c-04a279918f25
+- Move around the desktop and open its tools from a radial menu.
+- Ask questions by voice and hear responses spoken aloud.
+- Launch applications and use a compact command panel.
+- Set focus timers, choose ambient sounds, and use media controls.
+- Keep a temporary file stash and access clipboard tools.
+- Show desktop telemetry when running as a native application.
 
-## Run Locally
+Some controls and sample data are currently demonstrations rather than full operating-system integrations. Behavior may differ between the desktop build and the browser preview.
 
-**Prerequisites:**  Node.js
+## Run locally
 
+You’ll need Node.js 22 or later. For AI responses, provide a Gemini API key in a `.env` file at the project root:
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+```env
+GEMINI_API_KEY=your_api_key_here
+```
 
-## Build the Windows desktop installer
-
-The desktop app uses Tauri. On Windows, install Node.js 22, Rust (MSVC toolchain), the Visual Studio C++ Build Tools, and the WebView2 Runtime.
+Install dependencies and start the development server:
 
 ```powershell
-npm ci --legacy-peer-deps
+npm install --legacy-peer-deps
+npm run dev
+```
+
+The development server runs at `http://localhost:3000`. Keep the API key private and do not commit your `.env` file.
+
+Without a working API key, the assistant may return local fallback responses instead of generated answers.
+
+## Build the Windows desktop app
+
+Install Node.js 22 or later, Rust with the MSVC toolchain, Visual Studio C++ Build Tools, and the WebView2 Runtime. Then run:
+
+```powershell
+npm install --legacy-peer-deps
 npm run tauri -- build --bundles nsis
 ```
 
-The NSIS installer (`.exe`) is written to `src-tauri/target/release/bundle/nsis/`.
+The Windows installer is created in:
 
-The **Build Windows EXE** GitHub Actions workflow runs on pushes, pull requests, and version tags (`v*`). Download the installer from the workflow run's artifacts. To publish a GitHub Release, push a version tag or manually run the workflow with an optional release tag.
+```text
+src-tauri/target/release/bundle/nsis/
+```
+
+## Tech
+
+Orb is built with React, TypeScript, Vite, and Tauri, with a Rust desktop layer.
